@@ -1,0 +1,99 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: litellm-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: litellm
+      POSTGRES_PASSWORD: litellm
+      POSTGRES_DB: litellm
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U litellm"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - poc
+    # sem "ports:" — só acessível dentro da rede docker deste PoC.
+
+  litellm:
+    image: ghcr.io/berriai/litellm:main-stable
+    container_name: litellm
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      DATABASE_URL: postgresql://litellm:litellm@postgres:5432/litellm
+      # sem isso, "Logout" só limpa o cookie do LiteLLM — a sessão do
+      # oauth2-proxy continua válida e o auth-bridge reloga na hora.
+      PROXY_LOGOUT_URL: "http://localhost:4180/oauth2/sign_out?rd=http%3A%2F%2Flocalhost%3A4180%2Fui%2Flogin"
+    volumes:
+      - ./litellm/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000"]
+    networks:
+      - poc
+    # sem "ports:" de propósito — só o oauth2-proxy fica exposto ao host,
+    # replicando o desenho real (LiteLLM nunca público direto).
+
+  auth-bridge:
+    build: ./auth-bridge
+    container_name: auth-bridge
+    restart: unless-stopped
+    depends_on:
+      - litellm
+    environment:
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+    networks:
+      - poc
+    # também sem "ports:" — só alcançável via oauth2-proxy.
+
+  deprovision-bridge:
+    build: ./deprovision-bridge
+    container_name: deprovision-bridge
+    restart: unless-stopped
+    depends_on:
+      - litellm
+    ports:
+      - "8081:8000"
+    environment:
+      LITELLM_BASE_URL: http://litellm:4000
+      LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY}
+    networks:
+      - poc
+    # porta exposta só pra facilitar o teste manual do PoC. Em produção
+    # esse endpoint recebe chamada do backend do Graph (autenticada com
+    # segredo compartilhado), não fica aberto assim.
+
+  oauth2-proxy:
+    image: quay.io/oauth2-proxy/oauth2-proxy:latest
+    container_name: oauth2-proxy
+    restart: unless-stopped
+    depends_on:
+      - auth-bridge
+    ports:
+      - "4180:4180"
+    environment:
+      OAUTH2_PROXY_PROVIDER: google
+      OAUTH2_PROXY_CLIENT_ID: ${GOOGLE_CLIENT_ID}
+      OAUTH2_PROXY_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET}
+      OAUTH2_PROXY_COOKIE_SECRET: ${OAUTH2_PROXY_COOKIE_SECRET}
+      OAUTH2_PROXY_EMAIL_DOMAINS: ${OAUTH2_PROXY_EMAIL_DOMAINS:-*}
+      OAUTH2_PROXY_UPSTREAMS: http://auth-bridge:8000
+      OAUTH2_PROXY_HTTP_ADDRESS: 0.0.0.0:4180
+      OAUTH2_PROXY_REDIRECT_URL: http://localhost:4180/oauth2/callback
+      OAUTH2_PROXY_COOKIE_SECURE: "false"
+      OAUTH2_PROXY_SET_XAUTHREQUEST: "true"
+      OAUTH2_PROXY_SKIP_PROVIDER_BUTTON: "true"
+      # API (OpenCode, SDKs) não faz OIDC no browser: /v1/* passa sem sessão
+      # do Google e é autenticado pela virtual key (auth-bridge + LiteLLM).
+      OAUTH2_PROXY_SKIP_AUTH_ROUTES: "^/v1/"
+    networks:
+      - poc
+
+networks:
+  poc:
+    driver: bridge
