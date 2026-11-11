@@ -50,7 +50,9 @@ HOP_BY_HOP_HEADERS = {
     "content-length",
 }
 
-app = FastAPI()
+# docs/openapi do próprio bridge desligados: senão /openapi.json responde o
+# schema do bridge e quebra o Swagger do LiteLLM servido em "/".
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 # read=None: completions em streaming podem ficar abertas por minutos.
 client = httpx.AsyncClient(base_url=LITELLM_BASE_URL, timeout=httpx.Timeout(30.0, read=None))
 
@@ -119,6 +121,9 @@ async def gateway(full_path: str, request: Request):
     # oauth2-proxy, no modo reverse-proxy nativo, manda X-Forwarded-Email
     # (X-Auth-Request-Email é só do modo nginx auth_request).
     email = request.headers.get("x-forwarded-email")
+
+    if path == "/" and request.method == "GET":
+        return RedirectResponse(url="/ui/", status_code=307)
 
     if path in SSO_LOGIN_PATHS and email:
         try:
