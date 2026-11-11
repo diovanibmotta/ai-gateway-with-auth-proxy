@@ -50,9 +50,15 @@ HOP_BY_HOP_HEADERS = {
     "content-length",
 }
 
-app = FastAPI()
+# docs/openapi do próprio bridge desligados: senão /openapi.json responde o
+# schema do bridge e quebra o Swagger do LiteLLM servido em "/".
+app = FastAPI(docs_url=None, redoc_url=None, openapi_url=None)
 # read=None: completions em streaming podem ficar abertas por minutos.
 client = httpx.AsyncClient(base_url=LITELLM_BASE_URL, timeout=httpx.Timeout(30.0, read=None))
+
+
+class UserDeprovisionedError(Exception):
+    pass
 
 
 async def ensure_user(email: str) -> None:
@@ -60,7 +66,11 @@ async def ensure_user(email: str) -> None:
     # role=unknown e bloqueia /key/generate pela UI.
     admin = {"Authorization": f"Bearer {MASTER_KEY}"}
     info = await client.get("/user/info", headers=admin, params={"user_id": email})
-    if info.status_code == 200 and info.json().get("user_info"):
+    user_info = info.json().get("user_info") if info.status_code == 200 else None
+    if user_info:
+        # marcado pelo deprovision-bridge: não gera key nova nem sessão de UI.
+        if (user_info.get("metadata") or {}).get("deprovisioned"):
+            raise UserDeprovisionedError(email)
         return
     resp = await client.post(
         "/user/new",
@@ -112,8 +122,17 @@ async def gateway(full_path: str, request: Request):
     # (X-Auth-Request-Email é só do modo nginx auth_request).
     email = request.headers.get("x-forwarded-email")
 
+    if path == "/" and request.method == "GET":
+        return RedirectResponse(url="/ui/", status_code=307)
+
     if path in SSO_LOGIN_PATHS and email:
-        jwt_token = await jit_provision_and_mint_cookie(email)
+        try:
+            jwt_token = await jit_provision_and_mint_cookie(email)
+        except UserDeprovisionedError:
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"message": "User is deprovisioned", "type": "auth_error"}},
+            )
         redirect = RedirectResponse(url="/ui/?login=success", status_code=303)
         redirect.set_cookie(
             key="token",
