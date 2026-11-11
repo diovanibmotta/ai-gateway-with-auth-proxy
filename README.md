@@ -32,8 +32,8 @@ flowchart LR
     A --> L[LiteLLM :4000]
     L --> D[(Postgres)]
     L --> OA[(OpenAI API)]
-    X[Evento de desativação] -->|POST /events/user-deleted| DB[deprovision-bridge :8081]
-    DB -->|/user/update + /key/block| L
+    X[Evento do IdP] -->|POST /events/user-*| DB[deprovision-bridge :8081]
+    DB -->|/user/update + /key/block + /key/unblock| L
 ```
 
 | Rota | Quem autentica |
@@ -69,7 +69,7 @@ sequenceDiagram
 | **auth-bridge** (`./auth-bridge`) | não | Intercepta `/ui/login`: lê `X-Forwarded-Email` (já validado pelo oauth2-proxy), garante o usuário no LiteLLM como `internal_user`, gera virtual key e assina o mesmo JWT que o LiteLLM usaria nativamente (`ReturnedUITokenObject`, HS256 com o master key), setando o cookie `token`. Em `/v1/*` exige `Authorization: Bearer sk-...` e descarta `X-Forwarded-*` vindos do cliente. Demais paths: proxy em streaming (SSE), sem timeout de leitura. |
 | **litellm** | não | Gateway OpenAI-compatible. Config em `litellm/config.yaml`. |
 | **postgres** | não | Obrigatório: LiteLLM (Prisma) precisa de banco para sessão de UI/virtual keys. Migração roda sozinha no start. |
-| **deprovision-bridge** (`./deprovision-bridge`) | `:8081` (só PoC) | Recebe evento de usuário desativado/excluído e desabilita o usuário no LiteLLM (sem apagar) + bloqueia todas as keys dele. Simula o worker que, em produção, reagiria a change notifications do IdP. |
+| **deprovision-bridge** (`./deprovision-bridge`) | `:8081` (só PoC) | Recebe eventos de usuário desativado, excluído ou reativado e bloqueia/libera o acesso no LiteLLM (sem apagar e sem alterar o budget). Simula o worker que, em produção, reagiria a change notifications do IdP. |
 
 ### Modelos
 
@@ -176,20 +176,32 @@ sequenceDiagram
 
 ## Desprovisionamento de usuário
 
-O `deprovision-bridge` simula o worker que, em produção, reagiria a um evento do IdP (ex.: change notification do Microsoft Graph). No PoC o evento é disparado manualmente. Como `user_id` no LiteLLM = e-mail (mesma convenção do auth-bridge), basta o e-mail:
+O `deprovision-bridge` simula o worker que, em produção, reagiria a um evento do IdP (ex.: change notification do Microsoft Graph). No PoC o evento é disparado manualmente. Como `user_id` no LiteLLM = e-mail (mesma convenção do auth-bridge), basta o e-mail. Há três eventos:
+
+| Evento | Caso | Efeito |
+|---|---|---|
+| `POST /events/user-disabled` | Suspensão reversível (férias, licença) | Bloqueia acesso; pode ser revertido |
+| `POST /events/user-deleted` | Desligamento | Bloqueia acesso; definitivo; grava snapshot do budget |
+| `POST /events/user-enabled` | Volta da suspensão | Libera as keys bloqueadas pelo bridge e remove a flag |
 
 ```bash
-curl -X POST http://localhost:8081/events/user-deleted \
+curl -X POST http://localhost:8081/events/user-disabled \
   -H "Content-Type: application/json" \
   -d '{"email": "fulano@exemplo.com"}'
 ```
 
-O usuário **não é apagado** (`/user/delete` perderia o histórico de spend/logs vinculado ao `user_id`). Como `LiteLLM_UserTable` não tem flag de bloqueio (só keys têm), o bridge:
+O usuário **não é apagado** (`/user/delete` perderia o histórico de spend/logs vinculado ao `user_id`) e o **`max_budget` não é alterado**: o teto continua do usuário, então quem volta de férias retoma de onde parou e, no desligamento, o gestor decide a redistribuição. Como `LiteLLM_UserTable` não tem flag de bloqueio (só keys têm), o bridge:
 
-1. `/user/update` com `max_budget: 0` e `metadata.deprovisioned: true` (+ `deprovisioned_at`). O auth-bridge recusa login de UI (`403`) para usuário marcado.
-2. `/key/list?user_id=<email>` (paginado) + `/key/block` em cada key.
+1. `/user/update` com `metadata.deprovisioned: true`, `deprovision_state` (`suspended` ou `offboarded`) e `deprovisioned_at`. O auth-bridge recusa login de UI (`403`) para usuário marcado.
+2. `/key/list?user_id=<email>` (paginado) e `/key/block` nas keys que ainda não estavam bloqueadas. Os hashes bloqueados pelo bridge ficam em `metadata.blocked_key_hashes`: na reativação só eles são liberados, então uma key bloqueada manualmente antes continua bloqueada.
+3. No desligamento, `metadata.budget_snapshot` (`max_budget`, `spend`, `captured_at`) registra o orçamento na saída.
 
-Resposta: `{"disabled": "<email>", "blocked_keys": <n>}`. Reativar: `/key/unblock` nas keys, `/user/update` com `max_budget` original e remover `deprovisioned` do metadata.
+Respostas: `{"disabled": "<email>", "state": "<suspended|offboarded>", "blocked_keys": <n>}` e `{"enabled": "<email>", "unblocked_keys": <n>}`. Regras:
+
+- Os eventos são idempotentes (repetir não duplica efeito). `user-disabled` depois de `user-deleted` não rebaixa o estado.
+- `user-enabled` em usuário desligado (`offboarded`) responde `409`. Recontratação exige ação manual (ou um evento próprio, fora do escopo do PoC).
+- A redistribuição de saldo no LiteLLM acontece por budget de **team** ou ajuste do orçamento dos demais; `max_budget` é um teto, não um saldo reservado.
+- Usuário desprovisionado pela versão anterior do bridge (com `max_budget: 0`, sem `deprovision_state`) precisa de `max_budget` restaurado manualmente.
 
 Health check: `GET http://localhost:8081/health`.
 
