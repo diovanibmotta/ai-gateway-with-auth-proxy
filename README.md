@@ -16,6 +16,7 @@ Objetivo: provar que é possível logar na Admin UI do LiteLLM via SSO — sem o
 - [Testar o fluxo de login](#testar-o-fluxo-de-login)
 - [Configurar no OpenCode](#configurar-no-opencode)
 - [Desprovisionamento de usuário](#desprovisionamento-de-usuário)
+- [Apresentação](#apresentação)
 - [Troubleshooting](#troubleshooting)
 - [Achados que corrigiram a hipótese inicial](#achados-que-corrigiram-a-hipótese-inicial)
 - [Simplificações deliberadas](#simplificações-deliberadas)
@@ -206,6 +207,13 @@ Respostas: `{"disabled": "<email>", "state": "<suspended|offboarded>", "blocked_
 Health check: `GET http://localhost:8081/health`.
 
 > A porta `8081` fica exposta sem autenticação só para facilitar o teste. Em produção esse endpoint deve exigir segredo compartilhado/assinatura do emissor e não ficar publicado.
+
+## Apresentação
+
+Material para apresentar o PoC (criação de usuário, credenciais, sincronização, exclusão e o que fica fora do Community, como RBAC):
+
+- [Roteiro técnico completo](docs/apresentacao-sso-litellm-community.md): estrutura de slides com diagramas e fontes no repo.
+- [Deck de slides](https://claude.ai/artifact/FohwQVDFmWBKN1HZU86ZME): versão condensada (15 slides, orientada a negócio). Link de acesso restrito ao autor; compartilhar pelo menu Share do artifact.
 
 ## Troubleshooting
 
