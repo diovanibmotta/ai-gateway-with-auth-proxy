@@ -55,12 +55,20 @@ app = FastAPI()
 client = httpx.AsyncClient(base_url=LITELLM_BASE_URL, timeout=httpx.Timeout(30.0, read=None))
 
 
+class UserDeprovisionedError(Exception):
+    pass
+
+
 async def ensure_user(email: str) -> None:
     # sem registro em LiteLLM_UserTable o LiteLLM trata o dono da key como
     # role=unknown e bloqueia /key/generate pela UI.
     admin = {"Authorization": f"Bearer {MASTER_KEY}"}
     info = await client.get("/user/info", headers=admin, params={"user_id": email})
-    if info.status_code == 200 and info.json().get("user_info"):
+    user_info = info.json().get("user_info") if info.status_code == 200 else None
+    if user_info:
+        # marcado pelo deprovision-bridge: não gera key nova nem sessão de UI.
+        if (user_info.get("metadata") or {}).get("deprovisioned"):
+            raise UserDeprovisionedError(email)
         return
     resp = await client.post(
         "/user/new",
@@ -113,7 +121,13 @@ async def gateway(full_path: str, request: Request):
     email = request.headers.get("x-forwarded-email")
 
     if path in SSO_LOGIN_PATHS and email:
-        jwt_token = await jit_provision_and_mint_cookie(email)
+        try:
+            jwt_token = await jit_provision_and_mint_cookie(email)
+        except UserDeprovisionedError:
+            return JSONResponse(
+                status_code=403,
+                content={"error": {"message": "User is deprovisioned", "type": "auth_error"}},
+            )
         redirect = RedirectResponse(url="/ui/?login=success", status_code=303)
         redirect.set_cookie(
             key="token",

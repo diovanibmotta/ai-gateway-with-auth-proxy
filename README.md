@@ -33,7 +33,7 @@ flowchart LR
     L --> D[(Postgres)]
     L --> OA[(OpenAI API)]
     X[Evento de desativação] -->|POST /events/user-deleted| DB[deprovision-bridge :8081]
-    DB -->|/user/delete| L
+    DB -->|/user/update + /key/block| L
 ```
 
 | Rota | Quem autentica |
@@ -69,7 +69,7 @@ sequenceDiagram
 | **auth-bridge** (`./auth-bridge`) | não | Intercepta `/ui/login`: lê `X-Forwarded-Email` (já validado pelo oauth2-proxy), garante o usuário no LiteLLM como `internal_user`, gera virtual key e assina o mesmo JWT que o LiteLLM usaria nativamente (`ReturnedUITokenObject`, HS256 com o master key), setando o cookie `token`. Em `/v1/*` exige `Authorization: Bearer sk-...` e descarta `X-Forwarded-*` vindos do cliente. Demais paths: proxy em streaming (SSE), sem timeout de leitura. |
 | **litellm** | não | Gateway OpenAI-compatible. Config em `litellm/config.yaml`. |
 | **postgres** | não | Obrigatório: LiteLLM (Prisma) precisa de banco para sessão de UI/virtual keys. Migração roda sozinha no start. |
-| **deprovision-bridge** (`./deprovision-bridge`) | `:8081` (só PoC) | Recebe evento de usuário desativado/excluído e chama `/user/delete` no LiteLLM. Simula o worker que, em produção, reagiria a change notifications do IdP. |
+| **deprovision-bridge** (`./deprovision-bridge`) | `:8081` (só PoC) | Recebe evento de usuário desativado/excluído e desabilita o usuário no LiteLLM (sem apagar) + bloqueia todas as keys dele. Simula o worker que, em produção, reagiria a change notifications do IdP. |
 
 ### Modelos
 
@@ -91,7 +91,7 @@ sequenceDiagram
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── app.py
-├── deprovision-bridge/         # FastAPI: evento de desativação -> /user/delete
+├── deprovision-bridge/         # FastAPI: evento de desativação -> desabilita usuário + bloqueia keys
 │   ├── Dockerfile
 │   ├── requirements.txt
 │   └── app.py
@@ -183,6 +183,13 @@ curl -X POST http://localhost:8081/events/user-deleted \
   -H "Content-Type: application/json" \
   -d '{"email": "fulano@exemplo.com"}'
 ```
+
+O usuário **não é apagado** (`/user/delete` perderia o histórico de spend/logs vinculado ao `user_id`). Como `LiteLLM_UserTable` não tem flag de bloqueio (só keys têm), o bridge:
+
+1. `/user/update` com `max_budget: 0` e `metadata.deprovisioned: true` (+ `deprovisioned_at`). O auth-bridge recusa login de UI (`403`) para usuário marcado.
+2. `/key/list?user_id=<email>` (paginado) + `/key/block` em cada key.
+
+Resposta: `{"disabled": "<email>", "blocked_keys": <n>}`. Reativar: `/key/unblock` nas keys, `/user/update` com `max_budget` original e remover `deprovisioned` do metadata.
 
 Health check: `GET http://localhost:8081/health`.
 
