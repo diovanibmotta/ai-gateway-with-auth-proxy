@@ -120,6 +120,10 @@ sequenceDiagram
    | `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET` | sim | Credenciais do OAuth client |
    | `OAUTH2_PROXY_COOKIE_SECRET` | sim | `openssl rand -base64 32 \| tr -- '+/' '-_'` |
    | `OAUTH2_PROXY_EMAIL_DOMAINS` | não | `*` (default, qualquer conta) ou `seu-dominio.com.br` |
+   | `OAUTH2_PROXY_PROVIDER` | não | `google` (default) ou `oidc` para outro IdP (ex.: Keycloak) |
+   | `OAUTH2_PROXY_OIDC_ISSUER_URL` | só com `oidc` | Issuer do IdP (ex.: `https://sso.exemplo.com/realms/meu-realm`) |
+   | `OAUTH2_PROXY_SCOPE` | não | Vazio = default do provider. Se o IdP recusar com `invalid_scope`, listar só o aceito (ex.: `openid`) |
+   | `OAUTH2_PROXY_OIDC_EMAIL_CLAIM` | não | Claim do ID token usada como e-mail (default `email`). Trocar se o IdP não a devolver (ex.: `preferred_username`) |
    | `LITELLM_MASTER_KEY` | sim | Trocar o placeholder por um valor aleatório (`sk-...`) |
    | `OPENAI_API_KEY` | não | Só para chamadas reais de completion |
 
@@ -221,6 +225,8 @@ Material para apresentar o PoC (criação de usuário, credenciais, sincronizaç
 |---|---|
 | `401 Missing virtual key` | Header `Authorization` ausente / env var não carregada |
 | `401` do LiteLLM | Key inválida ou expirada |
+| `403` no callback com `error=invalid_scope` | IdP não aceita os scopes pedidos; ajustar `OAUTH2_PROXY_SCOPE` (ex.: `openid`) |
+| `neither the id_token nor the profileURL set an email` | IdP não devolve a claim `email`; ajustar `OAUTH2_PROXY_OIDC_EMAIL_CLAIM` |
 | `302` pro Google em `/v1` | oauth2-proxy sem `OAUTH2_PROXY_SKIP_AUTH_ROUTES` (recriar o container) |
 | Modelo não aparece no OpenCode | Não listado em `models` do `opencode.json` |
 | `400 ... not supported in v1/chat/completions` | Modelo só Responses API (ex.: `*-codex`, `*-pro`) |
